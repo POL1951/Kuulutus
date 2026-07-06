@@ -17,6 +17,9 @@ timeout /t 2 >nul
 rem Open the announcer page in the default browser after a short delay
 start "" /b cmd /c "timeout /t 3 >nul & start http://localhost:8081/"
 
+rem Open the awards (Top-3) page one second later
+start "" /b cmd /c "timeout /t 4 >nul & start http://localhost:8082/awards"
+
 python announcer_display.py --sarjat-xml "%KISA%\KilpSrj.xml" --kilp-dat "%KISA%\KILP.DAT" --lahestyminen 2
 
 echo.

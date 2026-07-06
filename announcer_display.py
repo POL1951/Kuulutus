@@ -643,9 +643,11 @@ _AWARDS_SHELL = """\
     font-size: 1.25rem; padding: 20px 24px;
   }
   h1 { font-size: 1.9rem; margin-bottom: 18px; letter-spacing: -0.02em; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
   .cat {
     background: #fff; border: 1px solid #ddd; border-radius: 8px;
-    margin-bottom: 18px; padding: 14px 18px;
+    padding: 14px 18px;
   }
   .cat-head { display: flex; align-items: center; justify-content: space-between;
               gap: 16px; margin-bottom: 8px; }
@@ -713,7 +715,7 @@ def _render_awards_html() -> bytes:
             f'</table>'
             f'</section>'
         )
-    body = '\n'.join(blocks) if blocks else \
+    body = '<div class="grid">\n' + '\n'.join(blocks) + '\n</div>' if blocks else \
         '<p class="empty">Ei viel&auml; maaliin tulleita sarjoja.</p>'
     return _AWARDS_SHELL.replace('__BODY__', body).encode('utf-8')
 
