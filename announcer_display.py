@@ -659,7 +659,6 @@ _AWARDS_SHELL = """\
   td.pos    { color: #888; width: 2ch; }
   td.bib    { font-family: ui-monospace, monospace; color: #555; text-align: right; width: 5ch; }
   td.name   { font-weight: 600; }
-  td.club   { color: #555; }
   td.finish { font-family: ui-monospace, monospace; text-align: right; }
   label.chk { font-size: 1.05rem; font-weight: 600; cursor: pointer;
               white-space: nowrap; user-select: none; }

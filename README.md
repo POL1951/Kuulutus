@@ -105,7 +105,7 @@ Palkintojenjakoa varten on erillinen näkymä osoitteessa
 
 Sivu näyttää **vain ne sarjat, joista on jo vähintään yksi maaliin tullut
 kilpailija**. Kustakin sarjasta listataan kolme parasta maaliajan mukaan
-(No, Nimi, Seura, Maali).
+(No, Nimi, Maali).
 
 Jokaisen sarjan vieressä on valintaruutu **"✅ Palkinnot jaettu"**. Kun
 palkinnot on jaettu, ruudun klikkaaminen merkitsee sarjan jaetuksi — sarja
