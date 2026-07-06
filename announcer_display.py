@@ -11,12 +11,14 @@ Configure in tulospalvelu:
 """
 
 import argparse
+import html
 import json
 import socket
 import struct
 import sys
 import threading
 import time
+import urllib.parse
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -27,6 +29,7 @@ LISTEN_HOST = '0.0.0.0'
 LISTEN_PORT = 15901
 HTTP_HOST   = '0.0.0.0'
 HTTP_PORT   = 8081
+AWARDS_PORT = 8082  # second HTTP server: Top-3 per category for the awards desk
 MAX_VISIBLE = 20  # kept for reference; no longer used to trim the list
 KILP_DAT_POLL_SEC = 5  # how often to re-read KILP.DAT for new competitors
 
@@ -294,6 +297,8 @@ _sarjat              = {}   # class_no → (class_id, name)
 _sarja_valuku        = {}   # class_no → last split index (valuku) from XML
 _lahestyminen_split  = 2    # fallback vali number for classes missing from XML
 _kilp_dat_path       = None # KILP.DAT path for on-demand approach-split lookups
+awarded_categories   = set() # class_no (1-based ClassNo) whose prizes are handed out
+                             # toggled from the /awards page; read under _lock
 
 
 def _resolve_comp(bib: int, dk: int) -> dict:
@@ -398,6 +403,48 @@ def _build_data() -> dict:
             })
 
     return {'rows': rows}
+
+# ---------------------------------------------------------------------------
+# Awards view: Top-3 per category (only categories with a finisher)
+# ---------------------------------------------------------------------------
+
+def _build_awards() -> list:
+    """List of categories that have >=1 finisher, each with its top-3.
+
+    Returns [{class_no, cat, awarded, top3:[{bib,name,club,finish}...]}...]
+    sorted with not-yet-awarded categories first, then by category name.
+    Same finish ranking as _build_data (elapsed = finish - start). Caller
+    must NOT hold _lock — this takes it.
+    """
+    with _lock:
+        cat_finishers: dict = {}
+        for dk, ev in _events.items():
+            if ev['finish_ms'] is None:
+                continue
+            comp = _resolve_comp(ev.get('bib'), dk)
+            sarja_idx = comp.get('sarja_idx', -1)
+            cat_finishers.setdefault(sarja_idx, []).append({
+                'bib':     comp.get('bib') or ev.get('bib') or dk,
+                'name':    comp.get('name', ''),
+                'club':    comp.get('club', ''),
+                'elapsed': ev['finish_ms'] - (ev['start_ms'] or 0),
+                'finish':  _format_ms(ev['finish_ms'], ev['start_ms']),
+            })
+        cats = []
+        for sarja_idx, finishers in cat_finishers.items():
+            finishers.sort(key=lambda f: f['elapsed'])
+            # sarja_idx is 0-based; _sarjat is keyed 1-based by ClassNo.
+            class_no = sarja_idx + 1
+            _cid, cat = _sarjat.get(class_no, ('', ''))
+            cats.append({
+                'class_no': class_no,
+                'cat':      cat or (f'Sarja {class_no}' if class_no > 0
+                                    else 'Tuntematon sarja'),
+                'awarded':  class_no in awarded_categories,
+                'top3':     finishers[:3],
+            })
+    cats.sort(key=lambda c: (c['awarded'], c['cat'].lower()))
+    return cats
 
 # ---------------------------------------------------------------------------
 # HTML page  (static shell; table body filled by JS via /data)
@@ -561,6 +608,147 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == '/data':
             payload = json.dumps(_build_data()).encode('utf-8')
             self._respond(200, 'application/json', payload)
+        else:
+            self._respond(404, 'text/plain', b'Not found')
+
+    def _respond(self, code: int, ctype: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+# ---------------------------------------------------------------------------
+# Awards page  (server-rendered; self-refreshes via <meta refresh>)
+# ---------------------------------------------------------------------------
+
+# CSS braces would clash with str.format, so the body is spliced with a
+# literal __BODY__ marker via str.replace instead.
+_AWARDS_SHELL = """\
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="5">
+<title>Palkinnot - Top 3</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #f5f5f5; color: #111;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 1.25rem; padding: 20px 24px;
+  }
+  h1 { font-size: 1.9rem; margin-bottom: 18px; letter-spacing: -0.02em; }
+  .cat {
+    background: #fff; border: 1px solid #ddd; border-radius: 8px;
+    margin-bottom: 18px; padding: 14px 18px;
+  }
+  .cat-head { display: flex; align-items: center; justify-content: space-between;
+              gap: 16px; margin-bottom: 8px; }
+  .cat-head h2 { font-size: 1.4rem; color: #222; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 0.85rem; text-transform: uppercase;
+       letter-spacing: 0.06em; color: #666; padding: 4px 10px; }
+  td { padding: 6px 10px; border-bottom: 1px solid #eee; white-space: nowrap; }
+  td.pos    { color: #888; width: 2ch; }
+  td.bib    { font-family: ui-monospace, monospace; color: #555; text-align: right; width: 5ch; }
+  td.name   { font-weight: 600; }
+  td.club   { color: #555; }
+  td.finish { font-family: ui-monospace, monospace; text-align: right; }
+  label.chk { font-size: 1.05rem; font-weight: 600; cursor: pointer;
+              white-space: nowrap; user-select: none; }
+  label.chk input { transform: scale(1.5); margin-right: 8px; vertical-align: middle; }
+  /* Awarded categories: greyed out and struck through */
+  .cat.awarded { opacity: 0.5; background: #efefef; }
+  .cat.awarded h2 { text-decoration: line-through; }
+  .cat.awarded td.name { text-decoration: line-through; }
+  .empty { text-align: center; color: #888; padding: 60px; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Palkinnot &mdash; Top 3 sarjoittain</h1>
+__BODY__
+</body>
+</html>
+"""
+
+
+def _render_awards_html() -> bytes:
+    """Render the full awards page (categories with a finisher, top-3 each)."""
+    cats = _build_awards()
+    blocks = []
+    for c in cats:
+        checked = 'checked' if c['awarded'] else ''
+        awarded_cls = ' awarded' if c['awarded'] else ''
+        rows = []
+        for i, f in enumerate(c['top3'], 1):
+            rows.append(
+                '<tr>'
+                f'<td class="pos">{i}.</td>'
+                f'<td class="bib">{html.escape(str(f["bib"]))}</td>'
+                f'<td class="name">{html.escape(f["name"])}</td>'
+                f'<td class="club">{html.escape(f["club"])}</td>'
+                f'<td class="finish">{html.escape(f["finish"])}</td>'
+                '</tr>'
+            )
+        # POST /awards/toggle?class_no=X flips the awarded flag; the checkbox
+        # auto-submits its form, with a <noscript> button as a no-JS fallback.
+        blocks.append(
+            f'<section class="cat{awarded_cls}">'
+            f'<div class="cat-head">'
+            f'<h2>{html.escape(c["cat"])}</h2>'
+            f'<form method="post" action="/awards/toggle?class_no={c["class_no"]}">'
+            f'<label class="chk"><input type="checkbox" onchange="this.form.submit()" {checked}>'
+            f'✅ Palkinnot jaettu</label>'
+            f'<noscript> <button type="submit">Vaihda</button></noscript>'
+            f'</form>'
+            f'</div>'
+            f'<table>'
+            f'<thead><tr><th>#</th><th>No</th><th>Nimi</th><th>Seura</th><th>Maali</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody>'
+            f'</table>'
+            f'</section>'
+        )
+    body = '\n'.join(blocks) if blocks else \
+        '<p class="empty">Ei viel&auml; maaliin tulleita sarjoja.</p>'
+    return _AWARDS_SHELL.replace('__BODY__', body).encode('utf-8')
+
+
+class _AwardsHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ('/', '/awards'):
+            self._respond(200, 'text/html; charset=utf-8', _render_awards_html())
+        else:
+            self._respond(404, 'text/plain', b'Not found')
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        length = int(self.headers.get('Content-Length') or 0)
+        if length:
+            self.rfile.read(length)          # drain body so the socket is clean
+        if parsed.path == '/awards/toggle':
+            qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                class_no = int(qs.get('class_no', ['0'])[0])
+            except (TypeError, ValueError):
+                class_no = 0
+            if class_no:
+                with _lock:
+                    if class_no in awarded_categories:
+                        awarded_categories.discard(class_no)
+                    else:
+                        awarded_categories.add(class_no)
+            # Post/Redirect/Get: bounce back to /awards so a reload won't re-POST.
+            self.send_response(303)
+            self.send_header('Location', '/awards')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
         else:
             self._respond(404, 'text/plain', b'Not found')
 
@@ -770,6 +958,9 @@ def main() -> None:
                         help=f'KILP.DAT competitor store to poll every '
                              f'{KILP_DAT_POLL_SEC}s for new competitors '
                              f'(default: KILP.DAT; pass empty to disable)')
+    parser.add_argument('--awards-port', metavar='PORT', type=int, default=AWARDS_PORT,
+                        help=f'port for the Top-3-per-category awards page '
+                             f'(default: {AWARDS_PORT})')
     args = parser.parse_args()
     if args.sarjat_xml:
         _sarjat, _sarja_valuku = load_sarjat_xml(args.sarjat_xml)
@@ -789,6 +980,13 @@ def main() -> None:
                                        daemon=True, name='kilp-dat')
         kilp_thread.start()
 
+    # Second HTTP server: Top-3-per-category awards page, own daemon thread.
+    awards_server = HTTPServer((HTTP_HOST, args.awards_port), _AwardsHandler)
+    awards_thread = threading.Thread(target=awards_server.serve_forever,
+                                     daemon=True, name='awards-http')
+    awards_thread.start()
+    print(f"Awards server on http://localhost:{args.awards_port}/", flush=True)
+
     server = HTTPServer((HTTP_HOST, HTTP_PORT), _Handler)
     print(f"HTTP server on http://localhost:{HTTP_PORT}/  (Ctrl-C to stop)", flush=True)
     try:
@@ -797,6 +995,7 @@ def main() -> None:
         print("\nStopped.")
     finally:
         server.server_close()
+        awards_server.server_close()
 
 
 if __name__ == '__main__':

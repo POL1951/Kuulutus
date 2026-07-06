@@ -98,6 +98,24 @@ kilpailijatieto `KILP.DAT`:ssa ei riitä.
 Maaliin tulleet rivit korostuvat vihreällä. Lähestymisajan sija-solu
 korostuu värillä: 1. sija vihreä, sijat 2–3 keltainen.
 
+## Palkintopöytä (Top-3)
+
+Palkintojenjakoa varten on erillinen näkymä osoitteessa
+<http://localhost:8082/awards>. Sivu päivittyy itsestään 5 sekunnin välein.
+
+Sivu näyttää **vain ne sarjat, joista on jo vähintään yksi maaliin tullut
+kilpailija**. Kustakin sarjasta listataan kolme parasta maaliajan mukaan
+(No, Nimi, Seura, Maali).
+
+Jokaisen sarjan vieressä on valintaruutu **"✅ Palkinnot jaettu"**. Kun
+palkinnot on jaettu, ruudun klikkaaminen merkitsee sarjan jaetuksi — sarja
+himmenee ja teksti yliviivataan, jotta jäljellä olevat sarjat erottuvat
+selkeästi. Tila säilyy palvelimen muistissa niin kauan kuin ohjelma on
+käynnissä (nollautuu uudelleenkäynnistyksessä).
+
+Portin voi tarvittaessa vaihtaa käynnistysvalitsimella
+`--awards-port PORTTI` (oletus 8082).
+
 ## Riippuvuus tulospalvelusta
 
 Kuuluttajanäyttö saa aikatiedot tulospalvelulta UDP-lähetyksinä. Jotta
