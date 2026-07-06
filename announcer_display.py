@@ -693,7 +693,6 @@ def _render_awards_html() -> bytes:
                 f'<td class="pos">{i}.</td>'
                 f'<td class="bib">{html.escape(str(f["bib"]))}</td>'
                 f'<td class="name">{html.escape(f["name"])}</td>'
-                f'<td class="club">{html.escape(f["club"])}</td>'
                 f'<td class="finish">{html.escape(f["finish"])}</td>'
                 '</tr>'
             )
@@ -710,7 +709,7 @@ def _render_awards_html() -> bytes:
             f'</form>'
             f'</div>'
             f'<table>'
-            f'<thead><tr><th>#</th><th>No</th><th>Nimi</th><th>Seura</th><th>Maali</th></tr></thead>'
+            f'<thead><tr><th>#</th><th>No</th><th>Nimi</th><th>Maali</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody>'
             f'</table>'
             f'</section>'
