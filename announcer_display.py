@@ -11,7 +11,6 @@ Configure in tulospalvelu:
 """
 
 import argparse
-import html
 import json
 import socket
 import struct
@@ -299,6 +298,9 @@ _lahestyminen_split  = 2    # fallback vali number for classes missing from XML
 _kilp_dat_path       = None # KILP.DAT path for on-demand approach-split lookups
 awarded_categories   = set() # class_no (1-based ClassNo) whose prizes are handed out
                              # toggled from the /awards page; read under _lock
+prizes_per_category  = 3     # podium depth AND the finisher threshold to show a
+                             # card; 1-5, set via GET /awards/set_prizes?n=X;
+                             # read/written under _lock
 
 
 def _resolve_comp(bib: int, dk: int) -> dict:
@@ -408,13 +410,16 @@ def _build_data() -> dict:
 # Awards view: Top-3 per category (only categories with a finisher)
 # ---------------------------------------------------------------------------
 
-def _build_awards() -> list:
-    """List of categories that have >=1 finisher, each with its top-3.
+def _build_awards(n: int) -> list:
+    """Categories with at least one finisher, each with its top-``n``.
 
-    Returns [{class_no, cat, awarded, top3:[{bib,name,club,finish}...]}...]
-    sorted with not-yet-awarded categories first, then by category name.
-    Same finish ranking as _build_data (elapsed = finish - start). Caller
-    must NOT hold _lock — this takes it.
+    Returns [{class_no, cat, awarded, top:[{bib,name,club,finish,elapsed}...]}...]
+    sorted with not-yet-awarded categories first, then by category name. A
+    category appears as soon as one competitor has finished; ``n``
+    (prizes_per_category) only caps the display depth, so the podium shows
+    however many have finished (1, 2, …) up to ``n``. Same finish ranking as
+    _build_data (elapsed = finish - start). Caller must NOT hold _lock — this
+    takes it.
     """
     with _lock:
         cat_finishers: dict = {}
@@ -432,6 +437,7 @@ def _build_awards() -> list:
             })
         cats = []
         for sarja_idx, finishers in cat_finishers.items():
+            # Visible as soon as anyone has finished; n caps only the depth.
             finishers.sort(key=lambda f: f['elapsed'])
             # sarja_idx is 0-based; _sarjat is keyed 1-based by ClassNo.
             class_no = sarja_idx + 1
@@ -441,7 +447,7 @@ def _build_awards() -> list:
                 'cat':      cat or (f'Sarja {class_no}' if class_no > 0
                                     else 'Tuntematon sarja'),
                 'awarded':  class_no in awarded_categories,
-                'top3':     finishers[:3],
+                'top':      finishers[:n],
             })
     cats.sort(key=lambda c: (c['awarded'], c['cat'].lower()))
     return cats
@@ -622,19 +628,23 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 # ---------------------------------------------------------------------------
-# Awards page  (server-rendered; self-refreshes via <meta refresh>)
+# Awards page  (JS-driven; polls /awards/data every 5s)
 # ---------------------------------------------------------------------------
+#
+# Switched from server-render + <meta refresh> to client-side polling so JS
+# state survives between refreshes. That persistence is what makes the two new
+# live features possible: the browser notification fires when an *awarded*
+# category's top-N changed since the previous poll, and a card header flashes
+# when its category was absent from the previous poll (newly ready to award).
+# Both diff against JS variables that a full page reload would have wiped.
 
-# CSS braces would clash with str.format, so the body is spliced with a
-# literal __BODY__ marker via str.replace instead.
-_AWARDS_SHELL = """\
+_AWARDS_HTML = """\
 <!DOCTYPE html>
 <html lang="fi">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="5">
-<title>Palkinnot - Top 3</title>
+<title>Palkinnot</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -642,7 +652,20 @@ _AWARDS_SHELL = """\
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 1.25rem; padding: 20px 24px;
   }
-  h1 { font-size: 1.9rem; margin-bottom: 18px; letter-spacing: -0.02em; }
+  h1 { font-size: 1.9rem; margin-bottom: 12px; letter-spacing: -0.02em; }
+  .settings {
+    display: flex; align-items: center; gap: 10px;
+    background: #fff; border: 1px solid #ddd; border-radius: 8px;
+    padding: 10px 16px; margin-bottom: 18px; font-size: 1.1rem;
+  }
+  .settings .n { min-width: 2ch; text-align: center;
+                 font-weight: 700; font-size: 1.3rem; }
+  .settings button {
+    width: 2.2rem; height: 2.2rem; font-size: 1.4rem; line-height: 1;
+    border: 1px solid #bbb; border-radius: 6px; background: #f0f0f0;
+    cursor: pointer;
+  }
+  .settings button:hover { background: #e2e2e2; }
   .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
   @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
   .cat {
@@ -650,7 +673,7 @@ _AWARDS_SHELL = """\
     padding: 14px 18px;
   }
   .cat-head { display: flex; align-items: center; justify-content: space-between;
-              gap: 16px; margin-bottom: 8px; }
+              gap: 16px; margin-bottom: 8px; border-radius: 6px; padding: 4px 6px; }
   .cat-head h2 { font-size: 1.4rem; color: #222; }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; font-size: 0.85rem; text-transform: uppercase;
@@ -667,55 +690,123 @@ _AWARDS_SHELL = """\
   .cat.awarded { opacity: 0.5; background: #efefef; }
   .cat.awarded h2 { text-decoration: line-through; }
   .cat.awarded td.name { text-decoration: line-through; }
+  /* Newly ready-to-award category: flash the header orange/yellow a few times */
+  @keyframes flash {
+    0%, 100% { background: transparent; }
+    25%      { background: #ffb300; }
+    50%      { background: #ffee00; }
+    75%      { background: #ffb300; }
+  }
+  .cat-head.flash { animation: flash 0.8s ease-in-out 4; }
   .empty { text-align: center; color: #888; padding: 60px; font-style: italic; }
 </style>
 </head>
 <body>
-<h1>Palkinnot &mdash; Top 3 sarjoittain</h1>
-__BODY__
+<h1>Palkinnot &mdash; Top-N sarjoittain</h1>
+<div class="settings">
+  <span>Palkintoja per sarja:</span>
+  <button type="button" onclick="setPrizes(-1)">&minus;</button>
+  <span class="n" id="prizeCount">3</span>
+  <button type="button" onclick="setPrizes(1)">+</button>
+</div>
+<div id="cats"><p class="empty">Ladataan&hellip;</p></div>
+<script>
+  let prizes     = 3;
+  let seenCats   = null;   // Set of class_no seen last poll (null = first load)
+  let prevTopSig = {};     // class_no -> signature of its top-N (awarded diff)
+
+  // Ask for notification permission once, on load.
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Signature of a top-N list: bib@finish per row. Changes when a finisher is
+  // displaced from the podium or a podium finish time is corrected.
+  function sigOf(top) {
+    return top.map(f => f.bib + '@' + f.finish).join('|');
+  }
+
+  function notify(msg) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(msg);
+    }
+  }
+
+  function setPrizes(delta) {
+    const n = Math.max(1, Math.min(5, prizes + delta));
+    fetch('/awards/set_prizes?n=' + n).then(() => poll()).catch(() => {});
+  }
+
+  function toggleCat(classNo) {
+    fetch('/awards/toggle?class_no=' + classNo, { method: 'POST' })
+      .then(() => poll()).catch(() => {});
+  }
+
+  function render(data) {
+    prizes = data.prizes;
+    document.getElementById('prizeCount').textContent = prizes;
+    const cats = data.cats;
+    const container = document.getElementById('cats');
+
+    if (!cats.length) {
+      container.innerHTML =
+        '<p class="empty">Ei viel&auml; palkittavia sarjoja.</p>';
+    } else {
+      container.innerHTML = '<div class="grid">' + cats.map(c => {
+        // "New" = this class_no was absent from the previous poll cycle. Never
+        // on the very first load (seenCats === null) so the whole board doesn't
+        // flash at startup.
+        const isNew   = seenCats !== null && !seenCats.has(c.class_no);
+        const flash   = isNew ? ' flash' : '';
+        const awarded = c.awarded ? ' awarded' : '';
+        const rows = c.top.map((f, i) =>
+          '<tr><td class="pos">' + (i + 1) + '.</td>'
+          + '<td class="bib">'    + esc(f.bib)    + '</td>'
+          + '<td class="name">'   + esc(f.name)   + '</td>'
+          + '<td class="finish">' + esc(f.finish) + '</td></tr>').join('');
+        return '<section class="cat' + awarded + '">'
+          + '<div class="cat-head' + flash + '">'
+          + '<h2>' + esc(c.cat) + '</h2>'
+          + '<label class="chk"><input type="checkbox" ' + (c.awarded ? 'checked' : '')
+          + ' onchange="toggleCat(' + c.class_no + ')"> Palkinnot jaettu</label>'
+          + '</div>'
+          + '<table><thead><tr><th>#</th><th>No</th><th>Nimi</th><th>Maali</th></tr></thead>'
+          + '<tbody>' + rows + '</tbody></table>'
+          + '</section>';
+      }).join('') + '</div>';
+    }
+
+    // Notify when an already-awarded category's top-N changed vs. last poll —
+    // a new finisher displaced someone on the podium, or a time was corrected.
+    const newSig = {};
+    cats.forEach(c => {
+      const s = sigOf(c.top);
+      newSig[c.class_no] = s;
+      if (c.awarded && prevTopSig[c.class_no] !== undefined
+          && prevTopSig[c.class_no] !== s) {
+        notify('\\u26a0\\ufe0f ' + c.cat + ': uusi tulos palkintosijalla!');
+      }
+    });
+    prevTopSig = newSig;
+    seenCats   = new Set(cats.map(c => c.class_no));
+  }
+
+  function poll() {
+    fetch('/awards/data').then(r => r.json()).then(render).catch(() => {});
+  }
+
+  poll();
+  setInterval(poll, 5000);
+</script>
 </body>
 </html>
 """
 
-
-def _render_awards_html() -> bytes:
-    """Render the full awards page (categories with a finisher, top-3 each)."""
-    cats = _build_awards()
-    blocks = []
-    for c in cats:
-        checked = 'checked' if c['awarded'] else ''
-        awarded_cls = ' awarded' if c['awarded'] else ''
-        rows = []
-        for i, f in enumerate(c['top3'], 1):
-            rows.append(
-                '<tr>'
-                f'<td class="pos">{i}.</td>'
-                f'<td class="bib">{html.escape(str(f["bib"]))}</td>'
-                f'<td class="name">{html.escape(f["name"])}</td>'
-                f'<td class="finish">{html.escape(f["finish"])}</td>'
-                '</tr>'
-            )
-        # POST /awards/toggle?class_no=X flips the awarded flag; the checkbox
-        # auto-submits its form, with a <noscript> button as a no-JS fallback.
-        blocks.append(
-            f'<section class="cat{awarded_cls}">'
-            f'<div class="cat-head">'
-            f'<h2>{html.escape(c["cat"])}</h2>'
-            f'<form method="post" action="/awards/toggle?class_no={c["class_no"]}">'
-            f'<label class="chk"><input type="checkbox" onchange="this.form.submit()" {checked}>'
-            f'✅ Palkinnot jaettu</label>'
-            f'<noscript> <button type="submit">Vaihda</button></noscript>'
-            f'</form>'
-            f'</div>'
-            f'<table>'
-            f'<thead><tr><th>#</th><th>No</th><th>Nimi</th><th>Maali</th></tr></thead>'
-            f'<tbody>{"".join(rows)}</tbody>'
-            f'</table>'
-            f'</section>'
-        )
-    body = '<div class="grid">\n' + '\n'.join(blocks) + '\n</div>' if blocks else \
-        '<p class="empty">Ei viel&auml; maaliin tulleita sarjoja.</p>'
-    return _AWARDS_SHELL.replace('__BODY__', body).encode('utf-8')
+_AWARDS_HTML_BYTES = _AWARDS_HTML.encode('utf-8')
 
 
 class _AwardsHandler(BaseHTTPRequestHandler):
@@ -723,9 +814,31 @@ class _AwardsHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in ('/', '/awards'):
-            self._respond(200, 'text/html; charset=utf-8', _render_awards_html())
+            self._respond(200, 'text/html; charset=utf-8', _AWARDS_HTML_BYTES)
+        elif parsed.path == '/awards/data':
+            with _lock:
+                n = prizes_per_category
+            payload = json.dumps(
+                {'prizes': n, 'cats': _build_awards(n)}).encode('utf-8')
+            self._respond(200, 'application/json', payload)
+        elif parsed.path == '/awards/set_prizes':
+            self._set_prizes(parsed)
         else:
             self._respond(404, 'text/plain', b'Not found')
+
+    def _set_prizes(self, parsed) -> None:
+        """GET /awards/set_prizes?n=X — set the podium depth / award threshold."""
+        global prizes_per_category
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            n = int(qs.get('n', ['3'])[0])
+        except (TypeError, ValueError):
+            n = 3
+        n = max(1, min(5, n))                # clamp to the supported 1-5 range
+        with _lock:
+            prizes_per_category = n
+        self._respond(200, 'application/json',
+                      json.dumps({'prizes': n}).encode('utf-8'))
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -738,17 +851,18 @@ class _AwardsHandler(BaseHTTPRequestHandler):
                 class_no = int(qs.get('class_no', ['0'])[0])
             except (TypeError, ValueError):
                 class_no = 0
+            awarded = False
             if class_no:
                 with _lock:
                     if class_no in awarded_categories:
                         awarded_categories.discard(class_no)
                     else:
                         awarded_categories.add(class_no)
-            # Post/Redirect/Get: bounce back to /awards so a reload won't re-POST.
-            self.send_response(303)
-            self.send_header('Location', '/awards')
-            self.send_header('Content-Length', '0')
-            self.end_headers()
+                        awarded = True
+            # JS-driven page: return the new state as JSON; the client re-polls.
+            self._respond(200, 'application/json',
+                          json.dumps({'class_no': class_no,
+                                      'awarded': awarded}).encode('utf-8'))
         else:
             self._respond(404, 'text/plain', b'Not found')
 
