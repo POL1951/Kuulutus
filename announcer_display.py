@@ -478,9 +478,12 @@ _HTML = """\
     margin-bottom: 16px;
     letter-spacing: -0.02em;
   }
-  table { width: 100%; border-collapse: collapse; }
+  /* table-layout:fixed makes the per-column widths we set (and restore from
+     localStorage) authoritative instead of content-driven. */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
   thead tr { background: #333; }
   th {
+    position: relative;   /* anchor for the absolutely-positioned resize handle */
     padding: 10px 14px;
     font-size: 1rem;
     font-weight: 600;
@@ -488,8 +491,21 @@ _HTML = """\
     letter-spacing: 0.07em;
     color: #fff;
     white-space: nowrap;
+    overflow: hidden;         /* clip long header text at the chosen width */
+    text-overflow: ellipsis;
   }
-  td { padding: 12px 14px; border-bottom: 1px solid #ddd; white-space: nowrap; }
+  /* Drag target on the right edge of every header cell; invisible until hover. */
+  .col-resize-handle {
+    position: absolute;
+    right: 0; top: 0;
+    width: 5px; height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    user-select: none;
+  }
+  .col-resize-handle:hover { background: rgba(255, 255, 255, 0.5); }
+  td { padding: 12px 14px; border-bottom: 1px solid #ddd; white-space: nowrap;
+       overflow: hidden; text-overflow: ellipsis; }
   tbody tr:nth-child(even) td { background: #ececec; }
 
   /* Column alignment */
@@ -535,14 +551,14 @@ _HTML = """\
 <table>
   <thead>
     <tr>
-      <th>No</th>
-      <th>Nimi</th>
-      <th>Seura</th>
-      <th>Sarja</th>
-      <th>L&auml;hestyminen</th>
-      <th>Sija</th>
-      <th>Maali</th>
-      <th>Sija</th>
+      <th data-col="NO">No<span class="col-resize-handle"></span></th>
+      <th data-col="NIMI">Nimi<span class="col-resize-handle"></span></th>
+      <th data-col="SEURA">Seura<span class="col-resize-handle"></span></th>
+      <th data-col="SARJA">Sarja<span class="col-resize-handle"></span></th>
+      <th data-col="LAHESTYMINEN">L&auml;hestyminen<span class="col-resize-handle"></span></th>
+      <th data-col="SIJA_SPLIT">Sija<span class="col-resize-handle"></span></th>
+      <th data-col="MAALI">Maali<span class="col-resize-handle"></span></th>
+      <th data-col="SIJA_FINISH">Sija<span class="col-resize-handle"></span></th>
     </tr>
   </thead>
   <tbody id="tbody">
@@ -595,6 +611,52 @@ _HTML = """\
 
   update();
   setInterval(update, 2000);
+
+  // ---- Drag-to-resize columns (pure JS, widths persisted in localStorage) ----
+  // Only the thead cells carry a data-col key; table-layout:fixed then makes the
+  // whole column follow the header width. The tbody is re-rendered every 2s, but
+  // the thead is untouched, so the widths (and their handles) survive refreshes.
+  (function () {
+    const PREFIX = 'col_';
+    const ths = document.querySelectorAll('thead th[data-col]');
+
+    // Restore any saved widths on load.
+    ths.forEach(th => {
+      const saved = localStorage.getItem(PREFIX + th.dataset.col);
+      if (saved) th.style.width = saved + 'px';
+    });
+
+    let target = null, startX = 0, startW = 0;
+
+    ths.forEach(th => {
+      const handle = th.querySelector('.col-resize-handle');
+      if (!handle) return;
+      handle.addEventListener('mousedown', e => {
+        target = th;
+        startX = e.pageX;
+        startW = th.getBoundingClientRect().width;
+        // Suppress text selection / show the resize cursor while dragging.
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'col-resize';
+        e.preventDefault();
+      });
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (!target) return;
+      const w = Math.max(40, startW + (e.pageX - startX));  // 40px floor
+      target.style.width = w + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (!target) return;
+      const w = parseInt(target.style.width, 10);
+      if (w) localStorage.setItem(PREFIX + target.dataset.col, w);
+      target = null;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    });
+  })();
 </script>
 </body>
 </html>
