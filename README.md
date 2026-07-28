@@ -1,131 +1,57 @@
-# Kuuluttajanäyttö
+# Kuuluttajanäyttö — asennus ja käyttö
 
-Reaaliaikainen kuuluttajanäyttö juoksukisoihin. Osa Pekka Pirilän
-tulospalvelu-järjestelmää (HkMaali). Näyttää kuuluttajalle selaimessa
-kilpailijoiden lähestymis- ja maaliajat sitä mukaa kun ajat saapuvat
-maalilaitteelta.
-
-Ohjelma (`announcer_display.py`) kuuntelee tulospalvelun lähettämiä
-UDP-sanomia, lukee kilpailijatiedot `KILP.DAT`-tiedostosta ja tarjoilee
-näkymän selaimeen osoitteessa <http://localhost:8081/>. Selain päivittyy
-automaattisesti 2 sekunnin välein.
+Reaaliaikainen kuuluttaja- ja palkintonäyttö tulospalvelun rinnalle. `announcer_display.py`
+kuuntelee tulospalvelun (HkKisaWin.exe) lähettämiä UDP-paketteja ja tarjoaa kolme
+selainnäkymää: kuuluttajanäytön sekä palkintosivut sarjoittain ja matkoittain.
 
 ## Vaatimukset
+- Python 3.8+
+- Ei ulkoisia kirjastoja (vain stdlib)
+- Tulospalvelu (HkKisaWin.exe) asennettuna
 
-- **Python 3** (versio 3.6 tai uudempi) asennettuna ja `python`-komento
-  löydettävissä `PATH`-polusta.
-- **Ei ulkoisia kirjastoja** — ohjelma käyttää pelkästään Pythonin
-  vakiokirjastoa (`socket`, `http.server`, `xml.etree` jne.), joten
-  `pip install` ei ole tarpeen.
-- **HkMaali.exe** (tulospalvelun maaliohjelma) samassa koneessa.
-- Selain (Chrome, Edge, Firefox) kuuluttajan näytöllä.
+## Tiedostorakenne
+- `C:\juoksu\` — ohjelman kotikansio (`announcer_display.py`, `start_kuuluttaja.bat`, `HkKisaWin.exe`, `K5.cfg`)
+- `C:\kisa\data\KisanNimi.1\` — kisakohtainen datakansio (`KILP.DAT`, `KilpSrj.xml`)
 
-## Kansiorakenne
+## Ensimmäinen käyttökerta
+1. Kloonaa repo: `git clone https://github.com/POL1951/Kuulutus.git C:\juoksu`
+2. Kopioi `HkKisaWin.exe` ja `K5.cfg` kansioon `C:\juoksu`
+3. Aja `create_shortcut.ps1` — luo Kuuluttaja-kuvakkeen työpöydälle
 
-```
-C:\juoksu\                        ← ohjelmatiedostot (tämä repo)
-    announcer_display.py          kuuluttajanäytön Python-ohjelma
-    start_kuuluttaja.bat          käynnistysskripti
-    create_shortcut.ps1           luo työpöydän "Kuuluttaja"-pikakuvakkeen
-    KU.cfg                        HkMaali.exe:n asetustiedosto
-    HkMaali.exe                   tulospalvelun maaliohjelma
-    README.md
+## Per kisa
+1. Luo kisafolder: `C:\kisa\data\KisanNimi.1\`
+2. Kopioi `KilpSrj.xml` kisafolderiin
+3. Muuta `start_kuuluttaja.bat`: `set KISA=C:\kisa\data\KisanNimi.1`
+4. Tulospalvelussa: `YHTEYS9=BRO:0/127.0.0.1` (K5.cfg hoitaa tämän automaattisesti)
+5. Kaksoisklikkaa Kuuluttaja-kuvaketta
 
-C:\kisa\data\KisanNimi.1\         ← yhden kisan datakansio
-    KILP.DAT                      kilpailijatiedot (HkMaali kirjoittaa tänne)
-    KilpSrj.xml                   sarjamääritykset
-    ...                           muut kisan tiedostot
-```
+## Selainikkunat (avautuvat automaattisesti)
+- http://localhost:8081/ — Kuuluttajanäyttö (reaaliaikainen maaliin tulijat)
+- http://localhost:8082/awards — Palkinnot sarjoittain (Top-N per sarja)
+- http://localhost:8083/awards — Palkinnot matkoittain (Top-N per matka+sukupuoli)
 
-Ohjelmatiedostot pysyvät aina kansiossa `C:\juoksu`. Jokaisella kisalla on
-oma datakansio polun `C:\kisa\data\` alla, esim. `Mikkeli.1`. HkMaali
-kirjoittaa `KILP.DAT`:n ja muut kisatiedostot siihen kansioon, joka on
-asetettu sen työhakemistoksi (ks. `start_kuuluttaja.bat`).
+## Kuuluttajanäytön sarakkeet (8081)
+- **NO, NIMI, SEURA, SARJA** — kilpailijan tiedot (`KILP.DAT`:sta)
+- **LÄHESTYMINEN + SIJA** — viimeinen väliaikapiste sarjakohtaisesti (`KilpSrj.xml`)
+- **MAALI + SIJA** — maaliaika ja sija sarjassa
+- Sarakeleveydet säädettävissä raahaamalla, tallennetaan selaimen muistiin
 
-## Uuden kisan valmistelu
+## Palkintosivu sarjoittain (8082)
+- Näyttää kaikki sarjat joissa on vähintään 1 maaliintullut
+- Top-N per sarja (N säädettävissä `[−]`/`[+]` napeilla, oletus 3)
+- Palkinnot jaettu -ruksi: harmaa yliviivaus, sarja siirtyy listan loppuun
+- Selain-ilmoitus jos jaetun sarjan tulokset muuttuvat
+- Uusi sarja vilkkuu oranssina kun tarpeeksi tuloksia
 
-1. **Luo kisalle datakansio** polun `C:\kisa\data\` alle, esim.
-   `C:\kisa\data\Mikkeli.1`.
-2. **Kopioi sarjamääritykset** `KilpSrj.xml` kyseiseen kansioon.
-3. **Muuta kansion nimi** `start_kuuluttaja.bat`-tiedostoon. Avaa tiedosto
-   ja aseta `KISA`-muuttujaan uuden kisan kansiopolku:
+## Palkintosivu matkoittain (8083)
+- Yhdistää kaikki saman matkan ja sukupuolen sarjat (esim. kaikki "63,6 km miehet")
+- Sama Top-N ja ruksi-toiminto kuin sarjoittain-näkymässä
 
-   ```bat
-   set KISA=C:\kisa\data\Mikkeli.1
-   ```
+## Tulospalvelun asetukset
+- `K5.cfg` sisältää: `YHTEYS9=BRO:0/127.0.0.1`
+- Tämä ohjaa UDP-paketit (`KILPT`, `VAIN_TULOST`) Python-ohjelmalle porttiin 15901
 
-   Tämä on ainoa rivi, joka pitää muuttaa kisaa vaihdettaessa. Sama polku
-   ohjaa sekä HkMaali.exe:n työhakemiston että kuuluttajanäytön lukemat
-   `KILP.DAT`- ja `KilpSrj.xml`-tiedostot samaan kansioon.
-
-## Käynnistys
-
-Käynnistä koko järjestelmä **työpöydän "Kuuluttaja"-pikakuvakkeesta**.
-
-Pikakuvake luodaan ajamalla kerran (PowerShellissä):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File C:\juoksu\create_shortcut.ps1
-```
-
-Pikakuvake ajaa `start_kuuluttaja.bat`:n, joka:
-
-1. käynnistää `HkMaali.exe`:n (pyytää UAC-vahvistuksen) kisan datakansiota
-   työhakemistona,
-2. käynnistää kuuluttajanäytön (`announcer_display.py`),
-3. avaa selaimen osoitteeseen <http://localhost:8081/>.
-
-Näytön saa suljettua sulkemalla komentoikkunan.
-
-## Mitä näyttö näyttää
-
-Näkymä on taulukko, jossa on yksi rivi jokaiselle kilpailijalle, jolta on
-saapunut aikasanoma. **Rivi ilmestyy vasta kun kilpailijalta on tullut
-todellinen aikasanoma** (lähestymis- tai maaliaika) — pelkkä
-kilpailijatieto `KILP.DAT`:ssa ei riitä.
-
-| Sarake        | Selitys                                             |
-|---------------|-----------------------------------------------------|
-| **No**        | Kilpailunumero                                      |
-| **Nimi**      | Kilpailijan nimi                                    |
-| **Seura**     | Seura                                               |
-| **Sarja**     | Sarja (KilpSrj.xml:n mukaan)                         |
-| **Lähestyminen** | Viimeisen väliajan (lähestymisajan) aika         |
-| **Sija**      | Sija sarjassa lähestymisajan mukaan                 |
-| **Maali**     | Maaliaika                                           |
-| **Sija**      | Lopullinen sija sarjassa maaliajan mukaan           |
-
-Maaliin tulleet rivit korostuvat vihreällä. Lähestymisajan sija-solu
-korostuu värillä: 1. sija vihreä, sijat 2–3 keltainen.
-
-## Palkintopöytä (Top-3)
-
-Palkintojenjakoa varten on erillinen näkymä osoitteessa
-<http://localhost:8082/awards>. Sivu päivittyy itsestään 5 sekunnin välein.
-
-Sivu näyttää **vain ne sarjat, joista on jo vähintään yksi maaliin tullut
-kilpailija**. Kustakin sarjasta listataan kolme parasta maaliajan mukaan
-(No, Nimi, Maali).
-
-Jokaisen sarjan vieressä on valintaruutu **"✅ Palkinnot jaettu"**. Kun
-palkinnot on jaettu, ruudun klikkaaminen merkitsee sarjan jaetuksi — sarja
-himmenee ja teksti yliviivataan, jotta jäljellä olevat sarjat erottuvat
-selkeästi. Tila säilyy palvelimen muistissa niin kauan kuin ohjelma on
-käynnissä (nollautuu uudelleenkäynnistyksessä).
-
-Portin voi tarvittaessa vaihtaa käynnistysvalitsimella
-`--awards-port PORTTI` (oletus 8082).
-
-## Riippuvuus tulospalvelusta
-
-Kuuluttajanäyttö saa aikatiedot tulospalvelulta UDP-lähetyksinä. Jotta
-HkMaali lähettää sanomat näytölle, sen asetustiedostossa (`KU.cfg`) on
-oltava yhteysrivi:
-
-```
-YHTEYS9=BRO:0/127.0.0.1
-```
-
-Tämä ohjaa HkMaalin lähettämään sanomat samaan koneeseen (`127.0.0.1`)
-porttiin, jota kuuluttajanäyttö kuuntelee (UDP 15901). Ilman tätä riviä
-näyttö ei saa mitään dataa eikä yksikään rivi ilmesty.
+## GitHub
+- Repo: https://github.com/POL1951/Kuulutus
+- Päivitä uusimpaan versioon: `cd C:\juoksu && git pull`
+- Tiedostot repossa: `announcer_display.py`, `start_kuuluttaja.bat`, `create_shortcut.ps1`, `K5.cfg`, `README.md`
