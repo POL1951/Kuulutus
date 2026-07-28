@@ -10,18 +10,20 @@ selainnäkymää: kuuluttajanäytön sekä palkintosivut sarjoittain ja matkoitt
 - Tulospalvelu (HkKisaWin.exe) asennettuna
 
 ## Tiedostorakenne
-- `C:\juoksu\` — ohjelman kotikansio (`announcer_display.py`, `start_kuuluttaja.bat`, `HkKisaWin.exe`, `K5.cfg`)
+- `C:\juoksu\` — ohjelman kotikansio (`announcer_display.py`, `start_kuuluttaja.bat`)
 - `C:\kisa\data\KisanNimi.1\` — kisakohtainen datakansio (`KILP.DAT`, `KilpSrj.xml`)
 
 ## Ensimmäinen käyttökerta
 1. Kloonaa repo: `git clone https://github.com/POL1951/Kuulutus.git C:\juoksu`
-2. Kopioi `HkKisaWin.exe` ja `K5.cfg` kansioon `C:\juoksu`
-3. Aja `create_shortcut.ps1` — luo Kuuluttaja-kuvakkeen työpöydälle
+2. Aja `create_shortcut.ps1` — luo Kuuluttaja-kuvakkeen työpöydälle
 
 ## Per kisa
 1. Muuta `start_kuuluttaja.bat`: `set KISA=C:\kisa\data\KisanNimi.1`
 2. Tulospalvelussa: `YHTEYS9=BRO:0/127.0.0.1` (K5.cfg hoitaa tämän automaattisesti)
 3. Kaksoisklikkaa Kuuluttaja-kuvaketta
+
+> HkKisaWin käynnistetään erillisen sovelluksen kautta — tätä ei tarvitse tehdä käsin
+> eikä `start_kuuluttaja.bat` käynnistä sitä.
 
 ## Selainikkunat (avautuvat automaattisesti)
 - http://localhost:8081/ — Kuuluttajanäyttö (reaaliaikainen maaliin tulijat)
