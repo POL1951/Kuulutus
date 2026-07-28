@@ -29,6 +29,7 @@ LISTEN_PORT = 15901
 HTTP_HOST   = '0.0.0.0'
 HTTP_PORT   = 8081
 AWARDS_PORT = 8082  # second HTTP server: Top-3 per category for the awards desk
+MATKA_PORT  = 8083  # third HTTP server: Top-N per distance+gender for the awards desk
 MAX_VISIBLE = 20  # kept for reference; no longer used to trim the list
 KILP_DAT_POLL_SEC = 5  # how often to re-read KILP.DAT for new competitors
 
@@ -90,7 +91,8 @@ KONETUNN = b'PY'
 # ---------------------------------------------------------------------------
 
 def load_sarjat_xml(path: str) -> tuple:
-    """Parse KilpSrj.xml into ({class_no: (class_id, name)}, {class_no: valuku}).
+    """Parse KilpSrj.xml into ({class_no: (class_id, name)}, {class_no: valuku},
+    {class_no: (gender, distance_km, distance_text)}).
 
     For each <Class ClassNo="N">: N (int) is the key. The first dict maps to
     (ClassId text, Name text stripped). The second dict maps to the class's
@@ -99,14 +101,21 @@ def load_sarjat_xml(path: str) -> tuple:
     equals the Intermediary Order for the competitor's own class — see
     HkDat.cpp: va[] is iterated 0..Sarjat[sarja].valuku[k_pv]), this K is the
     last / "lähestyminen" split index for that class.
+
+    The third dict feeds the "Top matkoittain" awards view: gender is read
+    from the first letter of ClassId (M/N convention, e.g. M63YL, N2140);
+    distance is the class's own race distance, from the first
+    Races/Race/Distance/Value found under the class (comma decimal separator
+    converted to a float; the original text is kept too for display).
     """
     sarjat: dict = {}
     valuku: dict = {}
+    extra: dict = {}
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError) as exc:
         print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
-        return sarjat, valuku
+        return sarjat, valuku, extra
 
     for cls in root.iter('Class'):
         try:
@@ -129,12 +138,27 @@ def load_sarjat_xml(path: str) -> tuple:
         if orders:
             valuku[class_no] = max(orders)
 
+        # Gender from the first letter of ClassId (M=miehet, N=naiset).
+        gender = class_id[:1].upper() if class_id[:1].upper() in ('M', 'N') else ''
+
+        # Distance from the first Race's Distance/Value (e.g. "63,6").
+        dist_text = (cls.findtext('./Races/Race/Distance/Value') or '').strip()
+        distance = None
+        if dist_text:
+            try:
+                distance = float(dist_text.replace(',', '.'))
+            except ValueError:
+                distance = None
+        if gender or distance is not None:
+            extra[class_no] = (gender, distance, dist_text)
+
     if sarjat:
         print(f"Loaded {len(sarjat)} categories "
-              f"({len(valuku)} with split counts) from {path}", file=sys.stderr)
+              f"({len(valuku)} with split counts, {len(extra)} with "
+              f"gender/distance) from {path}", file=sys.stderr)
     else:
         print(f"Warning: no categories found in {path}", file=sys.stderr)
-    return sarjat, valuku
+    return sarjat, valuku, extra
 
 # ---------------------------------------------------------------------------
 # Protocol helpers  (same as web_results.py)
@@ -294,6 +318,7 @@ _events              = {}   # dk → {start_ms, split_ms, finish_ms, bib}
 _arrival_order       = []   # dks newest-first (no cap); written under _lock
 _sarjat              = {}   # class_no → (class_id, name)
 _sarja_valuku        = {}   # class_no → last split index (valuku) from XML
+_class_extra         = {}   # class_no → (gender 'M'/'N'/'', distance_km, distance_text)
 _lahestyminen_split  = 2    # fallback vali number for classes missing from XML
 _kilp_dat_path       = None # KILP.DAT path for on-demand approach-split lookups
 awarded_categories   = set() # class_no (1-based ClassNo) whose prizes are handed out
@@ -301,6 +326,10 @@ awarded_categories   = set() # class_no (1-based ClassNo) whose prizes are hande
 prizes_per_category  = 3     # podium depth AND the finisher threshold to show a
                              # card; 1-5, set via GET /awards/set_prizes?n=X;
                              # read/written under _lock
+
+# --- "Top matkoittain" awards view (distance + gender, e.g. "Miehet 63,6 km") ---
+awarded_groups          = set()  # group_id strings whose prizes are handed out
+prizes_per_category_mtk = 3      # podium depth for the matka view; 1-5
 
 
 def _resolve_comp(bib: int, dk: int) -> dict:
@@ -451,6 +480,69 @@ def _build_awards(n: int) -> list:
             })
     cats.sort(key=lambda c: (c['awarded'], c['cat'].lower()))
     return cats
+
+# ---------------------------------------------------------------------------
+# Awards view: Top-N per distance+gender, merged across all classes that
+# share the same race distance and gender (e.g. all "63,6 km" men's classes
+# — YL, 40v, 50v, ... — become one "Miehet 63,6 km" podium).
+# ---------------------------------------------------------------------------
+
+def _group_id(gender: str, distance) -> str:
+    """Stable string key for a (gender, distance) group, used in URLs."""
+    dist_key = f"{distance:.1f}" if distance is not None else 'x'
+    return f"{gender or 'X'}_{dist_key}"
+
+
+def _group_label(gender: str, distance, distance_text: str) -> str:
+    who = 'Miehet' if gender == 'M' else 'Naiset' if gender == 'N' else 'Sarja'
+    if distance_text:
+        return f"{who} {distance_text} km"
+    if distance is not None:
+        return f"{who} {distance:g} km".replace('.', ',')
+    return f"{who} (matka tuntematon)"
+
+
+def _build_awards_by_distance(n: int) -> list:
+    """Categories merged by (gender, distance), each with its top-``n``.
+
+    Same shape/semantics as _build_awards (see that docstring), except the
+    grouping key is the race distance + gender pulled from KilpSrj.xml
+    instead of the raw sarja/class. Classes with no gender/distance info in
+    the XML fall into a single 'Sarja (matka tuntematon)' catch-all group so
+    they aren't silently dropped. Caller must NOT hold _lock — this takes it.
+    """
+    with _lock:
+        group_finishers: dict = {}   # group_id -> list of finisher dicts
+        group_meta: dict = {}        # group_id -> (label, awarded)
+        for dk, ev in _events.items():
+            if ev['finish_ms'] is None:
+                continue
+            comp = _resolve_comp(ev.get('bib'), dk)
+            sarja_idx = comp.get('sarja_idx', -1)
+            class_no = sarja_idx + 1
+            gender, distance, dist_text = _class_extra.get(class_no, ('', None, ''))
+            gid = _group_id(gender, distance)
+            group_finishers.setdefault(gid, []).append({
+                'bib':     comp.get('bib') or ev.get('bib') or dk,
+                'name':    comp.get('name', ''),
+                'club':    comp.get('club', ''),
+                'elapsed': ev['finish_ms'] - (ev['start_ms'] or 0),
+                'finish':  _format_ms(ev['finish_ms'], ev['start_ms']),
+            })
+            if gid not in group_meta:
+                group_meta[gid] = _group_label(gender, distance, dist_text)
+
+        groups = []
+        for gid, finishers in group_finishers.items():
+            finishers.sort(key=lambda f: f['elapsed'])
+            groups.append({
+                'group_id': gid,
+                'cat':      group_meta[gid],
+                'awarded':  gid in awarded_groups,
+                'top':      finishers[:n],
+            })
+    groups.sort(key=lambda c: (c['awarded'], c['cat'].lower()))
+    return groups
 
 # ---------------------------------------------------------------------------
 # HTML page  (static shell; table body filled by JS via /data)
@@ -939,6 +1031,112 @@ class _AwardsHandler(BaseHTTPRequestHandler):
         pass
 
 # ---------------------------------------------------------------------------
+# Matka-awards page (JS-driven; polls /awards/data every 5s) — identical
+# behaviour/markup to the per-sarja Palkinnot page above, just re-titled and
+# pointed at the distance+gender grouping. Kept as a full copy (rather than
+# templating one HTML string) so the two pages can diverge freely later
+# without threading a "mode" flag through the JS.
+# ---------------------------------------------------------------------------
+
+_AWARDS_MTK_HTML = _AWARDS_HTML.replace(
+    '<title>Palkinnot</title>', '<title>Palkinnot - matkoittain</title>'
+).replace(
+    '<h1>Palkinnot &mdash; Top-N sarjoittain</h1>',
+    '<h1>Palkinnot &mdash; Top-N matkoittain</h1>'
+).replace(
+    "onchange=\"toggleCat(' + c.class_no + ')\"",
+    "onchange=\"toggleCat(&quot;' + c.group_id + '&quot;)\""
+).replace(
+    "newSig[c.class_no] = s;",
+    "newSig[c.group_id] = s;"
+).replace(
+    "if (c.awarded && prevTopSig[c.class_no] !== undefined\n          && prevTopSig[c.class_no] !== s) {",
+    "if (c.awarded && prevTopSig[c.group_id] !== undefined\n          && prevTopSig[c.group_id] !== s) {"
+).replace(
+    "!seenCats.has(c.class_no)",
+    "!seenCats.has(c.group_id)"
+).replace(
+    "seenCats   = new Set(cats.map(c => c.class_no));",
+    "seenCats   = new Set(cats.map(c => c.group_id));"
+).replace(
+    "function toggleCat(classNo) {\n    fetch('/awards/toggle?class_no=' + classNo, { method: 'POST' })",
+    "function toggleCat(groupId) {\n    fetch('/awards/toggle?group_id=' + encodeURIComponent(groupId), { method: 'POST' })"
+).replace(
+    "// Set of class_no seen last poll", "// Set of group_id seen last poll"
+).replace(
+    "// class_no -> signature", "// group_id -> signature"
+).replace(
+    "this class_no was absent", "this group_id was absent"
+)
+
+_AWARDS_MTK_HTML_BYTES = _AWARDS_MTK_HTML.encode('utf-8')
+
+
+class _AwardsMatkaHandler(BaseHTTPRequestHandler):
+    """Same routes as _AwardsHandler, but grouped by distance+gender."""
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ('/', '/awards'):
+            self._respond(200, 'text/html; charset=utf-8', _AWARDS_MTK_HTML_BYTES)
+        elif parsed.path == '/awards/data':
+            with _lock:
+                n = prizes_per_category_mtk
+            payload = json.dumps(
+                {'prizes': n, 'cats': _build_awards_by_distance(n)}).encode('utf-8')
+            self._respond(200, 'application/json', payload)
+        elif parsed.path == '/awards/set_prizes':
+            self._set_prizes(parsed)
+        else:
+            self._respond(404, 'text/plain', b'Not found')
+
+    def _set_prizes(self, parsed) -> None:
+        """GET /awards/set_prizes?n=X — set the podium depth / award threshold."""
+        global prizes_per_category_mtk
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            n = int(qs.get('n', ['3'])[0])
+        except (TypeError, ValueError):
+            n = 3
+        n = max(1, min(5, n))
+        with _lock:
+            prizes_per_category_mtk = n
+        self._respond(200, 'application/json',
+                      json.dumps({'prizes': n}).encode('utf-8'))
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        length = int(self.headers.get('Content-Length') or 0)
+        if length:
+            self.rfile.read(length)          # drain body so the socket is clean
+        if parsed.path == '/awards/toggle':
+            qs = urllib.parse.parse_qs(parsed.query)
+            group_id = (qs.get('group_id', [''])[0] or '').strip()
+            awarded = False
+            if group_id:
+                with _lock:
+                    if group_id in awarded_groups:
+                        awarded_groups.discard(group_id)
+                    else:
+                        awarded_groups.add(group_id)
+                        awarded = True
+            self._respond(200, 'application/json',
+                          json.dumps({'group_id': group_id,
+                                      'awarded': awarded}).encode('utf-8'))
+        else:
+            self._respond(404, 'text/plain', b'Not found')
+
+    def _respond(self, code: int, ctype: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+# ---------------------------------------------------------------------------
 # UDP listener  (daemon thread)
 # ---------------------------------------------------------------------------
 
@@ -1122,7 +1320,7 @@ def _handle_packet(sock: socket.socket, data: bytes, addr) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global _sarjat, _sarja_valuku, _lahestyminen_split, _kilp_dat_path
+    global _sarjat, _sarja_valuku, _class_extra, _lahestyminen_split, _kilp_dat_path
     parser = argparse.ArgumentParser(description='Announcer display for tulospalvelu')
     parser.add_argument('--sarjat-xml', metavar='FILE',
                         help='KilpSrj.xml with category definitions (ClassNo/ClassId/Name)')
@@ -1137,11 +1335,14 @@ def main() -> None:
     parser.add_argument('--awards-port', metavar='PORT', type=int, default=AWARDS_PORT,
                         help=f'port for the Top-3-per-category awards page '
                              f'(default: {AWARDS_PORT})')
+    parser.add_argument('--matka-port', metavar='PORT', type=int, default=MATKA_PORT,
+                        help=f'port for the Top-N-per-distance/gender awards page '
+                             f'(default: {MATKA_PORT})')
     args = parser.parse_args()
     if args.sarjat_xml:
-        _sarjat, _sarja_valuku = load_sarjat_xml(args.sarjat_xml)
+        _sarjat, _sarja_valuku, _class_extra = load_sarjat_xml(args.sarjat_xml)
     else:
-        _sarjat, _sarja_valuku = {}, {}
+        _sarjat, _sarja_valuku, _class_extra = {}, {}, {}
     _lahestyminen_split = args.lahestyminen
     _kilp_dat_path      = args.kilp_dat or None
     print(f"Lähestyminen split: per-class from XML "
@@ -1163,6 +1364,13 @@ def main() -> None:
     awards_thread.start()
     print(f"Awards server on http://localhost:{args.awards_port}/", flush=True)
 
+    # Third HTTP server: Top-N-per-distance/gender awards page ("matkoittain").
+    matka_server = HTTPServer((HTTP_HOST, args.matka_port), _AwardsMatkaHandler)
+    matka_thread = threading.Thread(target=matka_server.serve_forever,
+                                    daemon=True, name='matka-http')
+    matka_thread.start()
+    print(f"Matka-awards server on http://localhost:{args.matka_port}/", flush=True)
+
     server = HTTPServer((HTTP_HOST, HTTP_PORT), _Handler)
     print(f"HTTP server on http://localhost:{HTTP_PORT}/  (Ctrl-C to stop)", flush=True)
     try:
@@ -1172,6 +1380,7 @@ def main() -> None:
     finally:
         server.server_close()
         awards_server.server_close()
+        matka_server.server_close()
 
 
 if __name__ == '__main__':
