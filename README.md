@@ -19,11 +19,9 @@ selainnäkymää: kuuluttajanäytön sekä palkintosivut sarjoittain ja matkoitt
 3. Aja `create_shortcut.ps1` — luo Kuuluttaja-kuvakkeen työpöydälle
 
 ## Per kisa
-1. Luo kisafolder: `C:\kisa\data\KisanNimi.1\`
-2. Kopioi `KilpSrj.xml` kisafolderiin
-3. Muuta `start_kuuluttaja.bat`: `set KISA=C:\kisa\data\KisanNimi.1`
-4. Tulospalvelussa: `YHTEYS9=BRO:0/127.0.0.1` (K5.cfg hoitaa tämän automaattisesti)
-5. Kaksoisklikkaa Kuuluttaja-kuvaketta
+1. Muuta `start_kuuluttaja.bat`: `set KISA=C:\kisa\data\KisanNimi.1`
+2. Tulospalvelussa: `YHTEYS9=BRO:0/127.0.0.1` (K5.cfg hoitaa tämän automaattisesti)
+3. Kaksoisklikkaa Kuuluttaja-kuvaketta
 
 ## Selainikkunat (avautuvat automaattisesti)
 - http://localhost:8081/ — Kuuluttajanäyttö (reaaliaikainen maaliin tulijat)
