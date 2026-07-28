@@ -19,7 +19,7 @@ selainnäkymää: kuuluttajanäytön sekä palkintosivut sarjoittain ja matkoitt
 
 ## Per kisa
 1. Muuta `start_kuuluttaja.bat`: `set KISA=C:\kisa\data\KisanNimi.1`
-2. Tulospalvelussa: `YHTEYS9=BRO:0/127.0.0.1` (K5.cfg hoitaa tämän automaattisesti)
+2. Tulospalvelussa: `YHTEYS9=BRO:0/127.0.0.1`
 3. Kaksoisklikkaa Kuuluttaja-kuvaketta
 
 > HkKisaWin käynnistetään erillisen sovelluksen kautta — tätä ei tarvitse tehdä käsin
@@ -48,10 +48,9 @@ selainnäkymää: kuuluttajanäytön sekä palkintosivut sarjoittain ja matkoitt
 - Sama Top-N ja ruksi-toiminto kuin sarjoittain-näkymässä
 
 ## Tulospalvelun asetukset
-- `K5.cfg` sisältää: `YHTEYS9=BRO:0/127.0.0.1`
-- Tämä ohjaa UDP-paketit (`KILPT`, `VAIN_TULOST`) Python-ohjelmalle porttiin 15901
+- Asetus `YHTEYS9=BRO:0/127.0.0.1` ohjaa UDP-paketit (`KILPT`, `VAIN_TULOST`) Python-ohjelmalle porttiin 15901
 
 ## GitHub
 - Repo: https://github.com/POL1951/Kuulutus
 - Päivitä uusimpaan versioon: `cd C:\juoksu && git pull`
-- Tiedostot repossa: `announcer_display.py`, `start_kuuluttaja.bat`, `create_shortcut.ps1`, `K5.cfg`, `README.md`
+- Tiedostot repossa: `announcer_display.py`, `start_kuuluttaja.bat`, `create_shortcut.ps1`, `README.md`
