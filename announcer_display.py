@@ -375,7 +375,7 @@ def _build_data() -> dict:
         # Rank finishers per category by elapsed finish time.
         cat_finishers: dict = {}
         for dk, ev in _events.items():
-            if ev['finish_ms'] is not None:
+            if ev['finish_ms'] is not None and ev['finish_ms'] > 0:
                 sarja_idx = _resolve_comp(ev.get('bib'), dk).get('sarja_idx', -1)
                 elapsed = ev['finish_ms'] - (ev['start_ms'] or 0)
                 cat_finishers.setdefault(sarja_idx, []).append((dk, elapsed))
@@ -412,6 +412,10 @@ def _build_data() -> dict:
             # show. _arrival_order is already populated only on split/finish,
             # but enforce it explicitly here so the rule is structural.
             if ev['split_ms'] is None and ev['finish_ms'] is None:
+                continue
+            # A finish time of 0 (or negative) means the result was entered and
+            # then deleted/zeroed in tulospalvelu — never show it.
+            if ev['finish_ms'] is not None and ev['finish_ms'] <= 0:
                 continue
             comp = _resolve_comp(ev.get('bib'), dk)
             bib = comp.get('bib') or ev.get('bib') or dk
@@ -1141,6 +1145,10 @@ class _AwardsMatkaHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def _add_to_display(dk: int) -> None:
+    # Never add a competitor whose finish time was zeroed/deleted.
+    ev = _events.get(dk)
+    if ev is not None and ev['finish_ms'] is not None and ev['finish_ms'] <= 0:
+        return
     if dk not in _arrival_order:
         _arrival_order.insert(0, dk)
 
@@ -1292,8 +1300,15 @@ def _handle_packet(sock: socket.socket, data: bytes, addr) -> None:
             if vali == -1:
                 ev['start_ms'] = aika
             elif vali == 0:
-                ev['finish_ms'] = aika
-                _add_to_display(key)
+                if aika <= 0:
+                    # Zero finish time = result deleted/cancelled in
+                    # tulospalvelu: forget the finish and drop the row.
+                    ev['finish_ms'] = None
+                    if key in _arrival_order:
+                        _arrival_order.remove(key)
+                else:
+                    ev['finish_ms'] = aika
+                    _add_to_display(key)
             else:
                 # The "Lähestyminen" split is the competitor's own last split.
                 # vali is class-relative (== Intermediary Order for this
